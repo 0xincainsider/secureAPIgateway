@@ -1,0 +1,66 @@
+# =============================================================================
+# Secure API Gateway - .gitignore
+# =============================================================================
+
+# Environment files
+.env
+.env.local
+.env.production
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+*.whl
+.Python
+env/
+venv/
+.venv/
+ENV/
+env.bak/
+venv.bak/
+lib/
+lib64/
+include/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Testing
+.coverage
+htmlcov/
+.pytest_cache/
+test.db
+*.coverage
+
+# Docker
+docker-compose.override.yml
+
+# Logs
+*.log
+logs/
+
+# Database migrations
+migrations/versions/*.pyc
+
+# Documentation build
+site/
+
+# MyPy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/

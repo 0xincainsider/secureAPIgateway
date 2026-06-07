@@ -1,0 +1,18 @@
+# =============================================================================
+# Grafana Dashboard Provisioning
+# =============================================================================
+# Automatically loads and updates the API Gateway dashboard.
+# =============================================================================
+
+apiVersion: 1
+
+providers:
+  - name: "Secure API Gateway Dashboards"
+    orgId: 1
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 10
+    allowUiUpdates: true
+    options:
+      path: /etc/grafana/dashboards
+      foldersFromFilesStructure: false
