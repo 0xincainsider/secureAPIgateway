@@ -42,6 +42,10 @@ COPY . .
 ENV PATH=/home/gateway/.local/bin:$PATH
 RUN chown -R gateway:gateway /app /home/gateway/.local
 
+# Shared directory for multi-worker Prometheus metrics
+RUN mkdir -p /tmp/prometheus_metrics && chown gateway:gateway /tmp/prometheus_metrics
+ENV prometheus_multiproc_dir=/tmp/prometheus_metrics
+
 # Switch to non-root user
 USER gateway
 
@@ -52,5 +56,7 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
 
-# Run the application with uvicorn
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"]
+# Run database migrations, then start the application.
+# --no-server-header removes the default `server: uvicorn` header (see the
+# security middleware note in app/middleware/security.py).
+CMD ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4 --no-server-header"]

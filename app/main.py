@@ -14,18 +14,21 @@ import redis.asyncio as aioredis
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from sqlalchemy import select
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from app.api.v1.admin import router as admin_router
 from app.api.v1.auth import router as auth_router
 from app.core.config import get_settings
 from app.core.dependencies import set_redis_client
-from app.database.session import Base, dispose_engine, get_engine, get_session_factory
+from app.database.session import dispose_engine, get_engine
 from app.middleware.logging import LoggingMiddleware
+from app.middleware.metrics import MetricsMiddleware
+from app.middleware.rate_limit import RateLimitMiddleware
 from app.middleware.security import RequestValidationMiddleware, SecurityHeadersMiddleware
 from app.models.user import User  # noqa: F401 - Register model for Alembic
 from app.models.refresh_token import RefreshToken  # noqa: F401
 from app.models.audit_log import AuditLog  # noqa: F401
-from app.utils.logger import get_logger, log_security_event
+from app.utils.logger import get_logger
 
 settings = get_settings()
 logger = get_logger(__name__)
@@ -36,9 +39,8 @@ async def lifespan(app: FastAPI) -> Any:
     """Application lifecycle manager.
 
     Handles startup and shutdown events including:
-    - Database connection pool initialization
     - Redis connection
-    - Metrics setup
+    - Database connection pool (schema is managed by Alembic migrations)
     """
     logger.info(
         "Starting Secure API Gateway",
@@ -70,17 +72,10 @@ async def lifespan(app: FastAPI) -> Any:
     # Set global Redis client for dependencies
     set_redis_client(redis_client)
 
-    # Create database tables (in production, use Alembic migrations)
-    try:
-        engine = get_engine()
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-        logger.info("Database tables verified/created")
-    except Exception as exc:
-        logger.warning(
-            "Database initialization issue - ensure PostgreSQL is available",
-            extra={"error": str(exc)},
-        )
+    # Database schema is applied via Alembic migrations (see migrations/).
+    # Run `alembic upgrade head` before starting the service (the Docker
+    # entrypoint does this automatically).
+    get_engine()
 
     yield
 
@@ -101,7 +96,8 @@ app = FastAPI(
     ## Features
     * JWT-based authentication with refresh tokens
     * OAuth2 Password Flow (compatible with Swagger UI)
-    * Rate limiting (IP and user-based)
+    * Rate limiting (IP and user-based) via global middleware
+    * Role-based access control (superuser admin endpoints)
     * Structured JSON logging
     * Security audit trail
     * Prometheus metrics
@@ -120,9 +116,44 @@ app = FastAPI(
     },
 )
 
-# --- Middleware Setup (order matters: first added = outermost) ---
+# ---------------------------------------------------------------------------
+# Middleware setup.
+#
+# IMPORTANT: Starlette builds the middleware stack in REVERSE order of
+# registration (the last middleware added is the outermost). The sequence
+# below therefore lists middlewares from innermost to outermost, so the
+# effective stack is:
+#
+#   CORS -> TrustedHost -> Metrics -> RateLimit -> Logging
+#          -> RequestValidation -> SecurityHeaders -> app
+#
+# - CORS is outermost so preflight (OPTIONS) requests are handled first.
+# - TrustedHost validates the Host header early (host-header injection).
+# - Metrics is outside RateLimit so blocked requests are still counted.
+# - RateLimit short-circuits with 429 before reaching the app.
+# ---------------------------------------------------------------------------
 
-# CORS middleware
+
+# Security headers (innermost)
+app.add_middleware(SecurityHeadersMiddleware)
+
+# Request validation (SQL injection, path traversal, body size)
+app.add_middleware(RequestValidationMiddleware)
+
+# Structured request/response logging
+app.add_middleware(LoggingMiddleware)
+
+# Global rate limiting (IP- and user-based)
+app.add_middleware(RateLimitMiddleware)
+
+# Prometheus metrics
+if settings.prometheus_enabled:
+    app.add_middleware(MetricsMiddleware)
+
+# Host header validation (uses ALLOWED_HOSTS)
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.allowed_hosts_list)
+
+# CORS (outermost)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list,
@@ -138,88 +169,28 @@ app.add_middleware(
     max_age=3600,
 )
 
-# Security headers middleware
-app.add_middleware(SecurityHeadersMiddleware)
-
-# Request validation middleware (SQL injection, path traversal, etc.)
-app.add_middleware(RequestValidationMiddleware)
-
-# Structured logging middleware
-app.add_middleware(LoggingMiddleware)
-
-# --- Prometheus Metrics ---
+# --- Prometheus Metrics Endpoint ---
 if settings.prometheus_enabled:
-    from prometheus_client import Counter, Gauge, Histogram, generate_latest
+    import os
+
+    from prometheus_client import CollectorRegistry, generate_latest, multiprocess
     from starlette.responses import Response
-
-    # Define metrics
-    http_requests_total = Counter(
-        "http_requests_total",
-        "Total HTTP requests",
-        ["method", "endpoint", "status"],
-    )
-    http_request_duration_seconds = Histogram(
-        "http_request_duration_seconds",
-        "HTTP request duration in seconds",
-        ["method", "endpoint"],
-        buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0),
-    )
-    auth_login_success_total = Counter(
-        "auth_login_success_total",
-        "Total successful logins",
-    )
-    auth_login_failure_total = Counter(
-        "auth_login_failure_total",
-        "Total failed logins",
-    )
-    rate_limit_blocked_total = Counter(
-        "rate_limit_blocked_total",
-        "Total requests blocked by rate limiter",
-    )
-    active_connections = Gauge(
-        "active_connections",
-        "Number of active connections",
-    )
-
-    @app.middleware("http")
-    async def metrics_middleware(request: Request, call_next: Any) -> Any:
-        """Middleware that collects Prometheus metrics for each request."""
-        import time
-
-        method = request.method
-        path = request.url.path
-
-        # Skip metrics endpoint to avoid recursive counting
-        if path == "/metrics":
-            return await call_next(request)
-
-        start_time = time.time()
-        active_connections.inc()
-
-        try:
-            response = await call_next(request)
-            duration = time.time() - start_time
-            status_code = str(response.status_code)
-
-            http_requests_total.labels(method=method, endpoint=path, status=status_code).inc()
-            http_request_duration_seconds.labels(method=method, endpoint=path).observe(duration)
-
-            return response
-        except HTTPException as exc:
-            duration = time.time() - start_time
-            status_code = str(exc.status_code)
-
-            http_requests_total.labels(method=method, endpoint=path, status=status_code).inc()
-            http_request_duration_seconds.labels(method=method, endpoint=path).observe(duration)
-
-            raise
-        finally:
-            active_connections.dec()
 
     @app.get("/metrics", include_in_schema=False)
     async def metrics():
-        """Prometheus metrics endpoint."""
-        return Response(content=generate_latest(), media_type="text/plain")
+        """Prometheus metrics endpoint.
+
+        Uses the multiprocess collector when `prometheus_multiproc_dir` is
+        set (multi-worker deployments), merging metrics from every worker.
+        Falls back to the default single-process registry otherwise.
+        """
+        if os.environ.get("prometheus_multiproc_dir"):
+            registry = CollectorRegistry()
+            multiprocess.MultiProcessCollector(registry)
+            data = generate_latest(registry)
+        else:
+            data = generate_latest()
+        return Response(content=data, media_type="text/plain")
 
     logger.info("Prometheus metrics enabled")
 
@@ -276,3 +247,4 @@ async def health_check():
 # --- Include Routers ---
 
 app.include_router(auth_router, prefix=settings.api_v1_prefix)
+app.include_router(admin_router, prefix=settings.api_v1_prefix)

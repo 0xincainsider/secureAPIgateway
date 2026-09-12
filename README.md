@@ -137,19 +137,26 @@ graph TD
 - ✅ **User enumeration protection** (generic error messages)
 
 ### Rate Limiting
-- ✅ **IP-based rate limiting** (100 requests/minute default)
-- ✅ **User-based rate limiting** (200 requests/minute for authenticated users)
-- ✅ **Redis backend** for fast, atomic operations
+- ✅ **IP-based rate limiting** (100 requests/minute default) applied globally via middleware
+- ✅ **User-based rate limiting** (200 requests/minute) for authenticated requests
+- ✅ **Redis backend** with window-scoped keys for accurate `reset_at` / `Retry-After`
 - ✅ **HTTP 429 responses** with `Retry-After` headers
 - ✅ **Fail-open** behavior when Redis is unavailable
 
+### Authorization
+- ✅ **Role-based access control** (`is_superuser`) with admin-only endpoints
+- ✅ **Email verification** flow (signed tokens, dev mode returns the token)
+- ✅ **User enumeration protection** (generic error messages)
+
 ### Security
 - ✅ **OWASP Security Headers**: CSP, HSTS, XFO, X-Content-Type-Options, etc.
+- ✅ **Host header validation** via `ALLOWED_HOSTS` (TrustedHostMiddleware)
 - ✅ **Input validation**: Strong Pydantic schemas with custom validators
 - ✅ **Password strength enforcement**: ≥8 chars, upper, lower, digit, special
 - ✅ **SQL injection prevention**: Parameterized queries via SQLAlchemy ORM
 - ✅ **Request validation**: Body size limits, path traversal detection
 - ✅ **Audit logging**: Database-backed security event audit trail
+- ✅ **Separate JWT signing secrets** for access and refresh tokens
 - ✅ **No sensitive info in responses**: Passwords, tokens never exposed
 - ✅ **Non-root Docker user**: Principle of least privilege
 
@@ -165,6 +172,7 @@ graph TD
 - ✅ **Docker Compose** for full-stack orchestration
 - ✅ **Environment-based configuration** (12-factor app)
 - ✅ **Health checks** for all services
+- ✅ **Alembic migrations** applied automatically at container startup
 
 ---
 
@@ -255,7 +263,10 @@ All configuration is via environment variables. Copy `.env.example` to `.env` an
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SECRET_KEY` | (change me) | JWT signing key |
+| `SECRET_KEY` | (change me) | Base JWT signing key |
+| `ACCESS_TOKEN_SECRET` | (falls back to SECRET_KEY) | Access-token signing secret |
+| `REFRESH_TOKEN_SECRET` | (falls back to SECRET_KEY) | Refresh-token signing secret |
+| `EMAIL_VERIFICATION_TOKEN_EXPIRE_MINUTES` | 60 | Email verification token TTL |
 | `DATABASE_URL` | postgresql+asyncpg://... | PostgreSQL connection |
 | `REDIS_URL` | redis://redis:6379/0 | Redis connection |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | 15 | Access token TTL |
@@ -263,6 +274,7 @@ All configuration is via environment variables. Copy `.env.example` to `.env` an
 | `RATE_LIMIT_DEFAULT` | 100 | IP-based rate limit per window |
 | `RATE_LIMIT_PER_USER` | 200 | User-based rate limit per window |
 | `RATE_LIMIT_WINDOW_SECONDS` | 60 | Rate limit window |
+| `ALLOWED_HOSTS` | * | Allowed Host header values |
 | `BCRYPT_ROUNDS` | 12 | Password hashing cost factor |
 | `LOG_LEVEL` | INFO | Logging level |
 | `ENABLE_RATE_LIMIT` | true | Toggle rate limiting |
@@ -284,6 +296,15 @@ All configuration is via environment variables. Copy `.env.example` to `.env` an
 | `POST` | `/api/v1/auth/refresh` | Refresh tokens | ❌ |
 | `POST` | `/api/v1/auth/logout` | Logout (revoke tokens) | ✅ |
 | `GET` | `/api/v1/auth/me` | Get current user profile | ✅ |
+| `POST` | `/api/v1/auth/request-verification` | Request email verification | ✅ |
+| `POST` | `/api/v1/auth/verify-email` | Verify email address | ❌ |
+
+### Administration Endpoints (superuser)
+
+| Method | Endpoint | Description | Auth Required |
+|--------|----------|-------------|:---:|
+| `GET` | `/api/v1/admin/users` | List all users | ✅ superuser |
+| `GET` | `/api/v1/admin/audit-logs` | List security audit events | ✅ superuser |
 
 ### Other Endpoints
 
@@ -392,6 +413,8 @@ The gateway implements **14+ security controls** from the OWASP Top 10 and beyon
 | **Audit Logging** | JSON structured + DB audit trail | [Logging CS](https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html) |
 | **Error Handling** | No sensitive info in errors | [Error Handling CS](https://cheatsheetseries.owasp.org/cheatsheets/Error_Handling_Cheat_Sheet.html) |
 | **Token Revocation** | Redis blacklist + DB revocation | [Session Mgmt CS](https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html) |
+| **RBAC** | Superuser-only admin endpoints | [Access Control CS](https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html) |
+| **Host Header Validation** | TrustedHostMiddleware with ALLOWED_HOSTS | [Host Header Attacks](https://portswigger.net/web-security/host-header) |
 
 ---
 
@@ -407,6 +430,7 @@ The gateway exposes metrics at `GET /metrics`:
 | `http_request_duration_seconds` | Histogram | Request latency distribution |
 | `auth_login_success_total` | Counter | Successful logins |
 | `auth_login_failure_total` | Counter | Failed logins |
+| `auth_register_total` | Counter | User registrations |
 | `rate_limit_blocked_total` | Counter | Rate-limited requests |
 | `active_connections` | Gauge | Current active connections |
 
@@ -461,7 +485,8 @@ pytest tests/security/ -v    # Security tests (5+ tests)
 secure-api-gateway/
 ├── app/                          # Application source code
 │   ├── api/v1/                   # API route handlers
-│   │   └── auth.py               # Authentication endpoints
+│   │   ├── auth.py               # Authentication endpoints
+│   │   └── admin.py              # Superuser administration endpoints
 │   ├── core/                     # Core configuration
 │   │   ├── config.py             # Pydantic Settings
 │   │   ├── dependencies.py       # FastAPI dependencies
@@ -470,7 +495,9 @@ secure-api-gateway/
 │   │   └── session.py            # Async SQLAlchemy session
 │   ├── middleware/                # Middleware components
 │   │   ├── logging.py            # Structured request logging
-│   │   └── security.py           # Security headers & validation
+│   │   ├── security.py           # Security headers & validation
+│   │   ├── rate_limit.py         # Global rate limiting
+│   │   └── metrics.py            # Prometheus request metrics
 │   ├── models/                   # SQLAlchemy ORM models
 │   │   ├── user.py               # User model
 │   │   ├── refresh_token.py      # RefreshToken model
@@ -484,7 +511,8 @@ secure-api-gateway/
 │   ├── services/                 # Business logic layer
 │   │   └── auth_service.py       # Authentication service
 │   ├── utils/                    # Utility modules
-│   │   └── logger.py             # JSON structured logger
+│   │   ├── logger.py             # JSON structured logger
+│   │   └── metrics.py            # Centralized Prometheus metrics
 │   └── main.py                   # FastAPI application entry point
 ├── tests/                        # Test suite
 │   ├── unit/                     # Unit tests (10+)
@@ -513,10 +541,10 @@ secure-api-gateway/
 - [ ] **OAuth2 Authorization Code Flow** with social login (Google, GitHub)
 - [ ] **API Key management** for machine-to-machine authentication
 - [ ] **Webhook signature verification**
-- [ ] **Advanced rate limiting** (sliding window, token bucket)
+- [ ] **Advanced rate limiting** (true sliding window, token bucket)
 - [ ] **Alertmanager integration** for alerting on security events
 - [ ] **OWASP ZAP integration** for automated security scanning
-- [ ] **SQLAlchemy 2.0 migrations** with full Alembic workflow
+- [x] **SQLAlchemy 2.0 migrations** with full Alembic workflow
 - [ ] **Kubernetes deployment manifests** (Helm charts)
 - [ ] **End-to-end encryption** support (client-side encryption)
 - [ ] **Compliance reports** (GDPR, SOC2 audit trail exports)

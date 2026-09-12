@@ -73,6 +73,15 @@ def get_rate_limiter() -> RateLimiter:
     return _rate_limiter
 
 
+def get_global_rate_limiter() -> RateLimiter | None:
+    """Get the global rate limiter singleton, or None if not initialized.
+
+    Used by middleware, which must fail open (pass the request through)
+    when Redis / the rate limiter is unavailable.
+    """
+    return _rate_limiter
+
+
 def get_token_blacklist() -> TokenBlacklist:
     """Dependency: Get the token blacklist instance."""
     if _token_blacklist is None:
@@ -142,6 +151,25 @@ async def get_current_user(
         raise credentials_exception
 
     return user
+
+
+async def get_current_superuser(
+    current_user: User = Depends(get_current_user),
+) -> User:
+    """Dependency: Require a superuser (admin) role.
+
+    Builds on get_current_user and additionally enforces that the
+    authenticated user has administrator privileges.
+
+    Raises:
+        HTTPException 403: If the user is not a superuser.
+    """
+    if not current_user.is_superuser:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin privileges required",
+        )
+    return current_user
 
 
 async def get_optional_user(

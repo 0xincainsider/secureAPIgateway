@@ -6,14 +6,14 @@ This document explains every security-related design decision made in the Secure
 
 ---
 
-## 1. Password Hashing: bcrypt via passlib
+## 1. Password Hashing: bcrypt (direct)
 
-**Decision:** Use bcrypt (via passlib) with 12 rounds for password hashing.
+**Decision:** Use bcrypt (via the `bcrypt` library directly) with 12 rounds for password hashing.
 
 **Rationale:**
 - bcrypt is a well-vetted, adaptive hashing function designed specifically for password storage.
 - The cost factor (rounds) is configurable and can be increased as hardware improves.
-- passlib provides a clean abstraction and automatic salt generation.
+- The `bcrypt` library provides automatic salt generation with a small, stable API.
 - Argon2 was considered but bcrypt was chosen for broader library support and established track record.
 - 12 rounds provides ~250ms hash time on modern hardware, balancing security and UX.
 

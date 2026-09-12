@@ -29,10 +29,16 @@ from app.schemas.auth import (
     UserRegisterRequest,
     UserResponse,
 )
-from app.security.jwt import create_access_token, create_refresh_token, decode_token
+from app.security.jwt import (
+    create_access_token,
+    create_refresh_token,
+    create_verification_token,
+    decode_token,
+)
 from app.security.rate_limiter import RateLimiter
 from app.security.token_blacklist import TokenBlacklist
 from app.utils.logger import get_logger, log_security_event
+from app.utils.metrics import auth_login_failure_total, auth_login_success_total, auth_register_total
 
 settings = get_settings()
 logger = get_logger(__name__)
@@ -175,6 +181,7 @@ class AuthService:
             endpoint="/auth/register",
             status_code=201,
         )
+        auth_register_total.inc()
 
         return UserResponse.model_validate(user)
 
@@ -213,6 +220,7 @@ class AuthService:
                 status_code=401,
                 details="Invalid credentials",
             )
+            auth_login_failure_total.inc()
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid username/email or password",
@@ -235,16 +243,14 @@ class AuthService:
                 user_id=user.id,
                 status_code=401,
             )
+            auth_login_failure_total.inc()
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Account is inactive",
             )
 
-        # Generate tokens
-        access_token, expires_in, access_jti = create_access_token(
-            subject=user.id,
-            extra_claims={"username": user.username, "email": user.email},
-        )
+        # Generate tokens (no PII embedded in the JWT claims)
+        access_token, expires_in, access_jti = create_access_token(subject=user.id)
         refresh_token_str, _, refresh_jti = create_refresh_token(subject=user.id)
 
         # Hash refresh token before storing
@@ -284,6 +290,7 @@ class AuthService:
             endpoint="/auth/login",
             status_code=200,
         )
+        auth_login_success_total.inc()
 
         return TokenResponse(
             access_token=access_token,
@@ -304,9 +311,9 @@ class AuthService:
         Raises:
             HTTPException 401: If refresh token is invalid.
         """
-        # Decode the refresh token
+        # Decode the refresh token (signed with the dedicated refresh secret)
         try:
-            payload = decode_token(refresh_token_str)
+            payload = decode_token(refresh_token_str, secret=settings.jwt_refresh_secret)
         except Exception:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -363,11 +370,8 @@ class AuthService:
                 detail="User not found or inactive",
             )
 
-        # Issue new tokens
-        access_token, expires_in, access_jti = create_access_token(
-            subject=user.id,
-            extra_claims={"username": user.username, "email": user.email},
-        )
+        # Issue new tokens (no PII embedded in the JWT claims)
+        access_token, expires_in, access_jti = create_access_token(subject=user.id)
         new_refresh_token, _, new_jti = create_refresh_token(subject=user.id)
 
         # Store new refresh token
@@ -458,6 +462,118 @@ class AuthService:
             UserResponse with user details.
         """
         return UserResponse.model_validate(user)
+
+    async def request_verification(self, user: User) -> dict:
+        """Generate an email verification token for a user.
+
+        In a real deployment this token is delivered by email. In non-
+        production environments the token is returned in the response so
+        the flow can be exercised end-to-end.
+
+        Args:
+            user: The authenticated user requesting verification.
+
+        Returns:
+            Dict with the verification token (dev only) or a generic message.
+        """
+        verification_token, expires_in, _ = create_verification_token(subject=user.id)
+
+        await self._audit_log(
+            event_type="verification_requested",
+            description=f"Verification email requested for: {user.username}",
+            severity="info",
+            user_id=user.id,
+            status_code=200,
+        )
+
+        # Never return the token in production; deliver via email instead.
+        if settings.app_env == "production":
+            log_security_event(
+                logger,
+                "verification_email_sent",
+                ip=self._get_client_ip(),
+                user_id=str(user.id),
+                endpoint="/auth/request-verification",
+                status_code=200,
+            )
+            return {
+                "message": "If the account is pending verification, a confirmation link has been sent.",
+                "expires_in": expires_in,
+            }
+
+        return {
+            "message": "Verification token generated (development only - in production it is emailed)",
+            "token": verification_token,
+            "expires_in": expires_in,
+        }
+
+    async def verify_email(self, token: str) -> dict:
+        """Verify a user's email address using a signed verification token.
+
+        Args:
+            token: The verification token (JWT of type "verify").
+
+        Returns:
+            Dict with a success message.
+
+        Raises:
+            HTTPException 401: If the token is invalid or expired.
+        """
+        try:
+            payload = decode_token(token)
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or expired verification token",
+            )
+
+        if payload.get("type") != "verify":
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token type",
+            )
+
+        try:
+            user_id = UUID(payload["sub"])
+        except (KeyError, ValueError, TypeError):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid verification token",
+            )
+
+        result = await self.session.execute(
+            select(User).where(User.id == user_id, User.is_active == True)
+        )
+        user = result.scalar_one_or_none()
+        if user is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="User not found or inactive",
+            )
+
+        if not user.is_verified:
+            user.is_verified = True
+
+        await self.session.flush()
+
+        await self._audit_log(
+            event_type="email_verified",
+            description=f"Email verified for: {user.username}",
+            severity="info",
+            user_id=user.id,
+            status_code=200,
+        )
+
+        log_security_event(
+            logger,
+            "email_verified",
+            ip=self._get_client_ip(),
+            user_id=str(user.id),
+            endpoint="/auth/verify-email",
+            status_code=200,
+        )
+
+        return {"message": "Email address verified successfully"}
 
     async def _revoke_all_user_tokens(self, user_id: UUID) -> None:
         """Revoke all active refresh tokens for a user.

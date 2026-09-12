@@ -40,6 +40,13 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_issuer: str = "secure-api-gateway"
     jwt_audience: str = "secure-api-gateway-client"
+    # Dedicated signing secrets. Fall back to SECRET_KEY when not set,
+    # so existing deployments keep working without changes.
+    access_token_secret: Optional[str] = None
+    refresh_token_secret: Optional[str] = None
+
+    # --- Email verification ---
+    email_verification_token_expire_minutes: int = 60
 
     # --- Database ---
     database_url: str = "postgresql+asyncpg://gateway:gateway_secret@localhost:5432/secure_gateway"
@@ -94,6 +101,21 @@ class Settings(BaseSettings):
     def refresh_token_expire_seconds(self) -> int:
         """Refresh token expiry in seconds."""
         return self.refresh_token_expire_days * 24 * 3600
+
+    @property
+    def email_verification_token_expire_seconds(self) -> int:
+        """Email verification token expiry in seconds."""
+        return self.email_verification_token_expire_minutes * 60
+
+    @property
+    def jwt_access_secret(self) -> str:
+        """Secret used to sign access (and verification) tokens."""
+        return self.access_token_secret or self.secret_key
+
+    @property
+    def jwt_refresh_secret(self) -> str:
+        """Secret used to sign refresh tokens."""
+        return self.refresh_token_secret or self.secret_key
 
 
 @lru_cache()

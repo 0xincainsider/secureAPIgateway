@@ -26,6 +26,9 @@ services:
       - APP_ENV=production
       - APP_DEBUG=false
       - SECRET_KEY=${SECRET_KEY:-change-this-to-a-long-random-secret-key-in-production}
+      - ACCESS_TOKEN_SECRET=${ACCESS_TOKEN_SECRET:-}
+      - REFRESH_TOKEN_SECRET=${REFRESH_TOKEN_SECRET:-}
+      - EMAIL_VERIFICATION_TOKEN_EXPIRE_MINUTES=60
       - DATABASE_URL=postgresql+asyncpg://gateway:gateway_secret@postgres:5432/secure_gateway
       - REDIS_URL=redis://redis:6379/0
       - PROMETHEUS_ENABLED=true

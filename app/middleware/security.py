@@ -110,8 +110,10 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         # Prevent caching of sensitive data
         response.headers["Cache-Control"] = "no-store, max-age=0"
 
-        # Remove Server header or set minimal info
-        response.headers["Server"] = "SecureAPI Gateway"
+        # NOTE: the Server header is intentionally NOT set here. Uvicorn adds
+        # its own at the ASGI level, so setting it in middleware produced a
+        # duplicated header. The production image drops it entirely with
+        # `uvicorn --no-server-header` (see Dockerfile).
 
 
 class RequestValidationMiddleware(BaseHTTPMiddleware):
@@ -163,7 +165,6 @@ class RequestValidationMiddleware(BaseHTTPMiddleware):
         # Check for suspicious patterns in URL path
         suspicious_patterns = [
             "..",  # Path traversal
-            "//",  # Double slash
             "\\",  # Backslash
         ]
         path = str(request.url.path)

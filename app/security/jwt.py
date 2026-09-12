@@ -59,7 +59,7 @@ def create_access_token(
 
     token = jwt.encode(
         payload,
-        settings.secret_key,
+        settings.jwt_access_secret,
         algorithm=settings.jwt_algorithm,
     )
 
@@ -94,18 +94,50 @@ def create_refresh_token(
 
     token = jwt.encode(
         payload,
-        settings.secret_key,
+        settings.jwt_refresh_secret,
         algorithm=settings.jwt_algorithm,
     )
 
     return token, expires_in, jti
 
 
-def decode_token(token: str) -> dict[str, Any]:
+def create_verification_token(subject: str | uuid.UUID) -> tuple[str, int, str]:
+    """Create a short-lived JWT for email address verification.
+
+    Returns:
+        Tuple of (encoded_token, expires_in_seconds, jti).
+    """
+    jti = uuid.uuid4().hex[:16]
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(minutes=settings.email_verification_token_expire_minutes)
+    expires_in = settings.email_verification_token_expire_seconds
+
+    payload: dict[str, Any] = {
+        "sub": str(subject),
+        "jti": jti,
+        "iat": int(now.timestamp()),
+        "exp": int(expires_at.timestamp()),
+        "iss": settings.jwt_issuer,
+        "aud": settings.jwt_audience,
+        "type": "verify",
+    }
+
+    token = jwt.encode(
+        payload,
+        settings.jwt_access_secret,
+        algorithm=settings.jwt_algorithm,
+    )
+
+    return token, expires_in, jti
+
+
+def decode_token(token: str, secret: str | None = None) -> dict[str, Any]:
     """Decode and validate a JWT token.
 
     Args:
         token: The JWT token string to decode.
+        secret: The signing secret to verify against. Defaults to the
+            access-token secret (also used by verification tokens).
 
     Returns:
         The decoded token payload.
@@ -116,7 +148,7 @@ def decode_token(token: str) -> dict[str, Any]:
     try:
         payload = jwt.decode(
             token,
-            settings.secret_key,
+            secret or settings.jwt_access_secret,
             algorithms=[settings.jwt_algorithm],
             audience=settings.jwt_audience,
             issuer=settings.jwt_issuer,
@@ -138,22 +170,3 @@ def decode_token(token: str) -> dict[str, Any]:
         raise InvalidTokenError("Token is not yet valid")
     except Exception:
         raise InvalidTokenError("Invalid token")
-
-
-def get_token_type(token: str) -> str | None:
-    """Extract the token type from a JWT without full validation.
-
-    Args:
-        token: The JWT token string.
-
-    Returns:
-        The token type claim or None if decoding fails.
-    """
-    try:
-        payload = jwt.decode(
-            token,
-            options={"verify_signature": False},
-        )
-        return payload.get("type")
-    except Exception:
-        return None

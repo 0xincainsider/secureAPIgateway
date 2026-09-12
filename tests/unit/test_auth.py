@@ -21,7 +21,6 @@ from app.security.jwt import (
     create_access_token,
     create_refresh_token,
     decode_token,
-    get_token_type,
 )
 
 settings = get_settings()
@@ -160,20 +159,6 @@ class TestJWTTokens:
         payload = decode_token(token)
         assert payload["type"] == "refresh"
         assert payload["sub"] == str(user_id)
-
-    def test_get_token_type(self):
-        """Verify token type extraction."""
-        user_id = uuid.uuid4()
-
-        access_token, _, _ = create_access_token(subject=user_id)
-        assert get_token_type(access_token) == "access"
-
-        refresh_token, _, _ = create_refresh_token(subject=user_id)
-        assert get_token_type(refresh_token) == "refresh"
-
-    def test_get_token_type_invalid(self):
-        """Verify token type returns None for invalid tokens."""
-        assert get_token_type("not-a-token") is None
 
 
 # =============================================================================

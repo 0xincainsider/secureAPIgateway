@@ -1,8 +1,10 @@
 """
 Rate limiting implementation using Redis.
 
-Provides IP-based and user-based rate limiting using a sliding window
-counter pattern stored in Redis.
+Provides IP-based and user-based rate limiting using a fixed window
+counter pattern stored in Redis. Each key is scoped to the current
+window boundary, so counters reset exactly at the window start and the
+reported reset_at / retry_after values are accurate.
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ from redis.asyncio import Redis
 
 from app.core.config import get_settings
 from app.utils.logger import get_logger
+from app.utils.metrics import rate_limit_blocked_total
 
 settings = get_settings()
 logger = get_logger(__name__)
@@ -22,7 +25,7 @@ logger = get_logger(__name__)
 class RateLimiter:
     """Rate limiter using Redis as the backend store.
 
-    Implements a sliding window counter per key, allowing configuration
+    Implements a fixed window counter per key, allowing configuration
     of request limits per time window.
     """
 
@@ -37,13 +40,13 @@ class RateLimiter:
         self.per_user_limit = settings.rate_limit_per_user
         self.window_seconds = settings.rate_limit_window_seconds
 
-    def _build_ip_key(self, ip: str) -> str:
+    def _build_ip_key(self, ip: str, window_start: int) -> str:
         """Build a Redis key for IP-based rate limiting."""
-        return f"ratelimit:ip:{ip}"
+        return f"ratelimit:ip:{ip}:{window_start}"
 
-    def _build_user_key(self, user_id: str) -> str:
+    def _build_user_key(self, user_id: str, window_start: int) -> str:
         """Build a Redis key for user-based rate limiting."""
-        return f"ratelimit:user:{user_id}"
+        return f"ratelimit:user:{user_id}:{window_start}"
 
     async def check_rate_limit(
         self,
@@ -63,28 +66,34 @@ class RateLimiter:
         if not settings.enable_rate_limit:
             return True, {"allowed": True, "limit": 0, "remaining": 0, "reset_at": 0}
 
+        now = int(time.time())
+        window_start = now - (now % self.window_seconds)
+
         if user_id:
-            key = self._build_user_key(user_id)
+            key = self._build_user_key(user_id, window_start)
             limit = self.per_user_limit
         elif ip:
-            key = self._build_ip_key(ip)
+            key = self._build_ip_key(ip, window_start)
             limit = self.default_limit
         else:
             return True, {"allowed": True, "limit": 0, "remaining": 0, "reset_at": 0}
 
-        return await self._check_window(key, limit)
+        return await self._check_window(key, limit, window_start, now)
 
     async def _check_window(
         self,
         key: str,
         limit: int,
+        window_start: int,
+        now: int,
     ) -> tuple[bool, dict]:
         """Check rate limit using a fixed window counter.
 
-        Uses Redis INCR with EXPIRE for atomic counter management.
+        The key already embeds the window boundary, so the counter is
+        naturally scoped to the current window and resets when the
+        window rolls over. TTL is one window (plus a small grace period)
+        so stale keys are cleaned up shortly after the window ends.
         """
-        now = int(time.time())
-        window_start = now - (now % self.window_seconds)
         reset_at = window_start + self.window_seconds
 
         try:
@@ -98,6 +107,7 @@ class RateLimiter:
             is_allowed = current_count <= limit
 
             if not is_allowed:
+                rate_limit_blocked_total.inc()
                 logger.warning(
                     "Rate limit exceeded",
                     extra={

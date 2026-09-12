@@ -92,6 +92,24 @@ class TokenRefreshRequest(BaseModel):
     refresh_token: str = Field(..., description="Valid refresh token")
 
 
+class VerifyEmailRequest(BaseModel):
+    """Schema for email verification request."""
+
+    token: str = Field(..., description="Email verification token")
+
+
+class VerificationResponse(BaseModel):
+    """Schema for the email verification request response.
+
+    The verification token is only included in non-production
+    environments for development convenience.
+    """
+
+    message: str = Field(..., description="Response message")
+    token: str | None = Field(None, description="Verification token (dev only)")
+    expires_in: int | None = Field(None, description="Token TTL in seconds")
+
+
 class UserResponse(BaseModel):
     """Schema for user data in API responses."""
 
@@ -106,14 +124,24 @@ class UserResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
-class ErrorResponse(BaseModel):
-    """Schema for standardized error responses."""
-
-    detail: str = Field(..., description="Error description")
-    error_code: str | None = Field(None, description="Machine-readable error code")
-
-
 class MessageResponse(BaseModel):
     """Schema for simple message responses."""
 
     message: str = Field(..., description="Response message")
+
+
+class AuditLogResponse(BaseModel):
+    """Schema for audit log entries in API responses."""
+
+    id: UUID = Field(..., description="Audit entry unique identifier")
+    event_type: str = Field(..., description="Security event type")
+    event_description: str = Field(..., description="Human-readable event description")
+    severity: str = Field(..., description="Severity level (info/warning/critical)")
+    ip_address: str | None = Field(None, description="Client IP address")
+    user_agent: str | None = Field(None, description="Client user agent")
+    endpoint: str | None = Field(None, description="Request endpoint")
+    status_code: int | None = Field(None, description="HTTP status code")
+    details: str | None = Field(None, description="Additional details")
+    created_at: datetime = Field(..., description="Event timestamp")
+
+    model_config = {"from_attributes": True}

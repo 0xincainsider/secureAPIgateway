@@ -140,7 +140,34 @@ async def test_user(test_session) -> User:
 
 
 @pytest_asyncio.fixture
+async def test_superuser(test_session) -> User:
+    """Create a superuser in the database."""
+    from app.core.security import hash_password
+
+    user = User(
+        id=uuid.uuid4(),
+        email="admin@example.com",
+        username="admin",
+        hashed_password=hash_password("AdminPass123!"),
+        display_name="Admin",
+        is_active=True,
+        is_verified=True,
+        is_superuser=True,
+    )
+    test_session.add(user)
+    await test_session.flush()
+    return user
+
+
+@pytest_asyncio.fixture
 async def auth_headers(test_user) -> dict[str, str]:
     """Create authentication headers with a valid JWT token."""
     token, _, _ = create_access_token(subject=test_user.id)
+    return {"Authorization": f"Bearer {token}"}
+
+
+@pytest_asyncio.fixture
+async def admin_headers(test_superuser) -> dict[str, str]:
+    """Create authentication headers with a valid superuser JWT token."""
+    token, _, _ = create_access_token(subject=test_superuser.id)
     return {"Authorization": f"Bearer {token}"}

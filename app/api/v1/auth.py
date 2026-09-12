@@ -7,7 +7,7 @@ and security controls built in.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Body, Depends, Request, status
 from fastapi.security import OAuth2PasswordRequestForm
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,6 +26,8 @@ from app.schemas.auth import (
     TokenResponse,
     UserRegisterRequest,
     UserResponse,
+    VerificationResponse,
+    VerifyEmailRequest,
 )
 from app.security.rate_limiter import RateLimiter
 from app.security.token_blacklist import TokenBlacklist
@@ -75,32 +77,19 @@ async def register(
     description="Login with username/email and password to receive JWT tokens. Accepts both form-encoded (OAuth2) and JSON bodies.",
 )
 async def login(
-    request: Request,
     form_data: OAuth2PasswordRequestForm = Depends(),
     auth_service: AuthService = Depends(_get_auth_service),
 ) -> TokenResponse:
     """Authenticate user and return JWT tokens.
 
     Compatible with OAuth2 Password Flow (form-encoded) and JSON bodies.
+    Rate limiting is enforced globally by the RateLimitMiddleware.
     """
     from app.schemas.auth import UserLoginRequest
     login_data = UserLoginRequest(
         username=form_data.username,
         password=form_data.password,
     )
-    # Check IP-based rate limiting for login attempts
-    ip = request.client.host if request.client else "unknown"
-    is_allowed, limit_info = await auth_service.rate_limiter.check_rate_limit(
-        ip=ip
-    )
-    if not is_allowed:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail={
-                "error": "Too many requests",
-                "retry_after": limit_info.get("retry_after", 60),
-            },
-        )
 
     return await auth_service.login(login_data)
 
@@ -146,3 +135,31 @@ async def get_me(
 ) -> UserResponse:
     """Get the current authenticated user's profile."""
     return await auth_service.get_current_user(current_user)
+
+
+@router.post(
+    "/request-verification",
+    response_model=VerificationResponse,
+    summary="Request email verification",
+    description="Generate an email verification token. In development the token is returned; in production it is delivered by email.",
+)
+async def request_verification(
+    current_user: User = Depends(get_current_user),
+    auth_service: AuthService = Depends(_get_auth_service),
+) -> dict:
+    """Generate a verification token for the current user."""
+    return await auth_service.request_verification(current_user)
+
+
+@router.post(
+    "/verify-email",
+    response_model=MessageResponse,
+    summary="Verify email address",
+    description="Verify the current user's email address using a signed verification token.",
+)
+async def verify_email(
+    verify_data: VerifyEmailRequest,
+    auth_service: AuthService = Depends(_get_auth_service),
+) -> dict:
+    """Verify a user's email address."""
+    return await auth_service.verify_email(verify_data.token)
